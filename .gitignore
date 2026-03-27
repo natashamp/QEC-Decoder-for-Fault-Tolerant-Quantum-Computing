@@ -1,0 +1,13 @@
+target/
+project/target/
+project/project/
+*.class
+*.log
+*.v
+*.vcd
+*.fir
+.bsp/
+.idea/
+.metals/
+.bloop/
+out/
