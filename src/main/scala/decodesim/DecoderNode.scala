@@ -95,7 +95,11 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
   // ── FSM ────────────────────────────────────────────────────────────
   switch(stateReg) {
     is(NodeState.IDLE) {
-      when(io.start && syndromeReg) {
+      when(io.startPeel) {
+        // IDLE node forced to PEELING (not on any correction path)
+        stateReg  := NodeState.PEELING
+        peeledReg := True
+      } elsewhen(io.start && syndromeReg) {
         stateReg     := NodeState.GROWING
         regionIdReg  := nodeId
         parentDirReg := ParentDir.NONE
@@ -138,12 +142,6 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
         peeledReg := True
       }
     }
-  }
-
-  // IDLE nodes during peeling are already "done"
-  when(stateReg === NodeState.IDLE && io.startPeel) {
-    stateReg  := NodeState.PEELING
-    peeledReg := True
   }
 
   // Reset

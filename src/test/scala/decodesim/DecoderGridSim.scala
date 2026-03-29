@@ -221,18 +221,7 @@ class DecoderGridSim extends AnyFunSuite {
       runFullDecode(dut, (1 << 0) | (1 << 1))
 
       assert(dut.io.done.toBoolean, "Should reach DONE")
-
-      // Debug: print node states
-      for (i <- 0 until 4) {
-        println(s"  Node $i: state=${dut.io.nodeStates(i).toEnum}, " +
-                s"region=${dut.io.nodeRegionIds(i).toInt}, " +
-                s"parent=${dut.io.nodeParentDirs(i).toEnum}, " +
-                s"match=${dut.io.nodeMatchDirs(i).toEnum}, " +
-                s"peeled=${dut.io.nodePeeled(i).toBoolean}, " +
-                s"syndrome=${dut.io.nodeSyndromes(i).toBoolean}")
-      }
       val corrBits = dut.io.correction.bits.toLong
-      println(s"  Correction bits: $corrBits (binary: ${corrBits.toBinaryString})")
 
       assert(corrBits != 0, s"Correction should be non-zero for matched pair, got $corrBits")
     }

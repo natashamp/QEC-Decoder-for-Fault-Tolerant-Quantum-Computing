@@ -110,9 +110,10 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
                        yield nodes(r)(c).io.state).toSeq
 
   val anyGrowingWire = nodeStateVec.map(_ === NodeState.GROWING).reduce(_ || _)
-  val allMatchedWire = !anyGrowingWire && nodeStateVec.map { st =>
-    st === NodeState.IDLE || st === NodeState.MATCHED || st === NodeState.PEELING
-  }.reduce(_ && _)
+  val anyMatchedWire = nodeStateVec.map(_ === NodeState.MATCHED).reduce(_ || _)
+  // allMatched: no nodes still growing AND at least one node has been matched
+  // (prevents triggering when all nodes are still IDLE)
+  val allMatchedWire = !anyGrowingWire && anyMatchedWire
 
   // Check if any node had a syndrome (i.e., there's actual work to do)
   val anySyndrome = (for (r <- 0 until rows; c <- 0 until cols)
@@ -170,18 +171,17 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
       nodeStart  := True
       cycleCount := cycleCount + 1
 
-      when(allMatchedWire && !anyGrowingWire) {
+      when(!anySyndrome) {
+        // No syndromes loaded — nothing to decode
+        phaseReg := GridPhase.DONE
+        doneReg  := True
+        nodeStart := False
+      } elsewhen(allMatchedWire) {
         // All active regions have matched — proceed to peeling
-        when(anySyndrome) {
-          phaseReg      := GridPhase.PEELING
-          nodeStart     := False
-          nodeStartPeel := True
-          cycleCount    := 0
-        } otherwise {
-          // No syndromes — nothing to decode
-          phaseReg := GridPhase.DONE
-          doneReg  := True
-        }
+        phaseReg      := GridPhase.PEELING
+        nodeStart     := False
+        nodeStartPeel := True
+        cycleCount    := 0
       } elsewhen(cycleCount >= config.maxGrowthCycles) {
         // Growth budget exceeded — stall
         stallReg := True
