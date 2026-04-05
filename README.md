@@ -1,4 +1,4 @@
-# ** Distributed, Hardware-Accelerated QEC Decoder for Fault-Tolerant Quantum Computing**
+# Distributed, Hardware-Accelerated QEC Decoder for Fault-Tolerant Quantum Computing
 
 Decode-Sim is a high-performance hardware implementation of a Minimum Weight Perfect Matching (MWPM)-inspired decoder designed to perform real-time Quantum Error Correction (QEC). Built with SpinalHDL, the project targets the Surface Code — the most promising error-correction scheme for scalable quantum processors.
 
