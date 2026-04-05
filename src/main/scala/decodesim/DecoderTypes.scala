@@ -21,6 +21,10 @@ case class DecoderConfig(
   // Cycle budgets for decode phases
   val maxGrowthCycles: Int = gridRows + gridCols // worst-case: full grid traversal
   val maxPeelCycles: Int = gridRows + gridCols   // worst-case: deepest tree
+
+  // Boundary matching delay: allow growth to find region-to-region matches
+  // before falling back to boundary matching. Set to half grid diameter.
+  val boundaryMatchDelay: Int = (gridRows + gridCols) / 2
 }
 
 // State machine states for a single decoder node
@@ -45,6 +49,7 @@ case class NodeLink(config: DecoderConfig) extends Bundle {
   val grown     = Bool()           // Is this neighbor's region actively growing?
   val parentDir = ParentDir()      // Parent direction of this neighbor (for peeling)
   val peeled    = Bool()           // Has this neighbor been peeled (removed from correction tree)?
+  val onPath    = Bool()           // Is this neighbor on the correction path? (wave signal)
 }
 
 // Top-level I/O for the full decoder grid

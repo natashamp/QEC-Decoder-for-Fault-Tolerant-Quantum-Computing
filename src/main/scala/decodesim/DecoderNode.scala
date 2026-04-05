@@ -25,6 +25,12 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
     // Our output link broadcast to all neighbors
     val linkOut = out(NodeLink(config))
 
+    // Path marking control (driven by grid's primary collision selection)
+    val startPathMark = in Bool()
+
+    // Boundary matching enable (driven by grid after delay threshold)
+    val boundaryEnable = in Bool()
+
     // Node status
     val state    = out(NodeState())
     val regionId = out UInt(config.regionIdWidth bits)
@@ -36,16 +42,18 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
     val matchedWithId  = out UInt(config.regionIdWidth bits) // Region ID of collision partner
     val peeled         = out Bool()
     val syndrome       = out Bool()
+    val onPath         = out Bool()        // Is this node on the correction path?
   }
 
   // Internal registers
   val stateReg     = RegInit(NodeState.IDLE)
   val syndromeReg  = RegInit(False)
-  val regionIdReg  = RegInit(U(0, config.regionIdWidth bits))
-  val matchedWith  = RegInit(U(0, config.regionIdWidth bits))
   val parentDirReg = RegInit(ParentDir.NONE)
-  val matchDirReg  = RegInit(ParentDir.NONE) // direction toward collision neighbor
   val peeledReg    = RegInit(False)
+  val onPathReg    = RegInit(False)
+
+  // Region tracking via RegionManager
+  val region = RegionManager(config)
 
   // Unique ID for this node (1-indexed; 0 = no region)
   val nodeId = U(row * config.gridCols + col + 1, config.regionIdWidth bits)
@@ -54,11 +62,10 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
   when(io.loadEnable) {
     syndromeReg  := io.syndromeIn
     stateReg     := NodeState.IDLE
-    regionIdReg  := U(0)
-    matchedWith  := U(0)
     parentDirReg := ParentDir.NONE
-    matchDirReg  := ParentDir.NONE
     peeledReg    := False
+    onPathReg    := False
+    region.reset()
   }
 
   // Collect neighbor signals
@@ -92,6 +99,17 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
   val numActiveChildren = childActive.map(_.asUInt.resize(3)).reduce(_ + _)
   val isLeaf = numActiveChildren === 0
 
+  // ── Path marking wave logic ────────────────────────────────────────
+  // A child is "on the path" if it has onPath=true and its parentDir points at me.
+  val childOnPath = Vec(Bool(), 4)
+  for (i <- 0 until 4) {
+    childOnPath(i) := neighbors(i).valid &&
+                       neighbors(i).onPath &&
+                       (neighbors(i).parentDir === oppositeDirs(i)) &&
+                       (neighbors(i).regionId =/= U(0))
+  }
+  val anyChildOnPath = childOnPath.orR
+
   // ── FSM ────────────────────────────────────────────────────────────
   switch(stateReg) {
     is(NodeState.IDLE) {
@@ -101,11 +119,11 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
         peeledReg := True
       } elsewhen(io.start && syndromeReg) {
         stateReg     := NodeState.GROWING
-        regionIdReg  := nodeId
+        region.activate(nodeId)
         parentDirReg := ParentDir.NONE
       } elsewhen(io.start && !syndromeReg && anyNeighborGrown) {
         stateReg     := NodeState.GROWING
-        regionIdReg  := absorbRegionIdComb
+        region.absorb(absorbRegionIdComb)
         parentDirReg := absorbParentDirComb
       }
     }
@@ -114,11 +132,28 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
       // Check for collision: neighbor growing with a different region
       for (i <- 0 until 4) {
         when(neighbors(i).valid && neighbors(i).grown &&
-             neighbors(i).regionId =/= regionIdReg &&
-             neighbors(i).regionId =/= 0) {
-          stateReg    := NodeState.MATCHED
-          matchedWith := neighbors(i).regionId
-          matchDirReg := neighborDirs(i)
+             region.detectCollision(neighbors(i).regionId)) {
+          stateReg := NodeState.MATCHED
+          region.markMatched(neighbors(i).regionId, neighborDirs(i))
+        }
+      }
+
+      // Boundary matching: a growing node at the grid edge can match to
+      // the virtual boundary. matchedWith=0 signals a boundary match.
+      // Only triggers if no region-to-region collision was detected above,
+      // AND boundaryEnable is asserted (after a delay to let real matches happen).
+      val regionCollisionDetected = Vec(Bool(), 4)
+      for (i <- 0 until 4) {
+        regionCollisionDetected(i) := neighbors(i).valid && neighbors(i).grown &&
+          region.detectCollision(neighbors(i).regionId)
+      }
+      when(!regionCollisionDetected.orR && io.boundaryEnable) {
+        for (i <- (0 until 4).reverse) {
+          when(!neighbors(i).valid) {
+            // Inactive neighbor = grid boundary in this direction
+            stateReg := NodeState.MATCHED
+            region.markBoundaryMatch(neighborDirs(i))
+          }
         }
       }
 
@@ -138,6 +173,12 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
     }
 
     is(NodeState.PEELING) {
+      // Path marking wave: propagate from primary collision nodes toward roots
+      when(io.startPathMark || anyChildOnPath) {
+        onPathReg := True
+      }
+
+      // Leaf peeling (still useful for convergence detection)
       when(isLeaf && !syndromeReg && !peeledReg) {
         peeledReg := True
       }
@@ -148,32 +189,31 @@ case class DecoderNode(config: DecoderConfig, row: Int, col: Int) extends Compon
   when(!io.reset_n) {
     stateReg     := NodeState.IDLE
     syndromeReg  := False
-    regionIdReg  := U(0)
-    matchedWith  := U(0)
     parentDirReg := ParentDir.NONE
-    matchDirReg  := ParentDir.NONE
     peeledReg    := False
+    onPathReg    := False
+    region.reset()
   }
 
   // ── Drive outputs ──────────────────────────────────────────────────
   io.linkOut.valid     := stateReg =/= NodeState.IDLE
-  io.linkOut.regionId  := regionIdReg
+  io.linkOut.regionId  := region.regionId
   io.linkOut.grown     := stateReg === NodeState.GROWING
   io.linkOut.parentDir := parentDirReg
   io.linkOut.peeled    := peeledReg
+  io.linkOut.onPath    := onPathReg
 
   io.state          := stateReg
-  io.regionId       := regionIdReg
+  io.regionId       := region.regionId
   io.parentDir      := parentDirReg
-  io.matchDir       := matchDirReg
-  io.matchedWithId  := matchedWith
+  io.matchDir       := region.matchDir
+  io.matchedWithId  := region.matchedWith
   io.peeled         := peeledReg
   io.syndrome       := syndromeReg
+  io.onPath         := onPathReg
 
-  // Correction flag: on the correction path after peeling
-  io.correctionFlag := (stateReg === NodeState.MATCHED && syndromeReg) ||
-                       (stateReg === NodeState.PEELING && !peeledReg &&
-                        (parentDirReg =/= ParentDir.NONE || matchDirReg =/= ParentDir.NONE))
+  // Correction flag: kept for backwards compatibility but no longer primary
+  io.correctionFlag := onPathReg && (parentDirReg =/= ParentDir.NONE)
 }
 
 // Verilog generation entry point

@@ -23,15 +23,18 @@ class DecoderNodeSim extends AnyFunSuite {
       n.grown     #= false
       n.parentDir #= ParentDir.NONE
       n.peeled    #= true
+      n.onPath    #= false
     }
   }
 
   def initSignals(dut: DecoderNode): Unit = {
-    dut.io.reset_n    #= true
-    dut.io.start      #= false
-    dut.io.startPeel  #= false
-    dut.io.loadEnable #= false
-    dut.io.syndromeIn #= false
+    dut.io.reset_n        #= true
+    dut.io.start          #= false
+    dut.io.startPeel      #= false
+    dut.io.loadEnable     #= false
+    dut.io.syndromeIn     #= false
+    dut.io.startPathMark  #= false
+    dut.io.boundaryEnable #= false
     tieOffNeighbors(dut)
   }
 
@@ -112,10 +115,10 @@ class DecoderNodeSim extends AnyFunSuite {
       dut.io.neighborIn.north.regionId #= 3
       dut.io.neighborIn.north.grown    #= true
       dut.io.neighborIn.north.peeled   #= false
+      dut.io.neighborIn.north.onPath   #= false
       step(dut)
 
       assert(dut.io.state.toEnum == NodeState.MATCHED)
-      assert(dut.io.correctionFlag.toBoolean)
     }
   }
 
@@ -158,6 +161,7 @@ class DecoderNodeSim extends AnyFunSuite {
       dut.io.neighborIn.east.grown     #= true
       dut.io.neighborIn.east.peeled    #= false
       dut.io.neighborIn.east.parentDir #= ParentDir.NONE
+      dut.io.neighborIn.east.onPath    #= false
 
       dut.io.start #= true
       step(dut, 2)
@@ -189,6 +193,7 @@ class DecoderNodeSim extends AnyFunSuite {
       dut.io.neighborIn.north.regionId #= 3
       dut.io.neighborIn.north.grown    #= true
       dut.io.neighborIn.north.peeled   #= false
+      dut.io.neighborIn.north.onPath   #= false
       step(dut)
       assert(dut.io.state.toEnum == NodeState.MATCHED)
 

@@ -16,6 +16,7 @@ object NodeLinkUtils {
     link.grown     := False
     link.parentDir := ParentDir.NONE
     link.peeled    := True  // boundary is always "peeled" (not on correction path)
+    link.onPath    := False // boundary is never on the correction path
     link
   }
 }

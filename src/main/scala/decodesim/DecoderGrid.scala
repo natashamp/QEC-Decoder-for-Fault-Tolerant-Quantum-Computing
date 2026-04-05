@@ -12,8 +12,10 @@ import spinal.lib._
 // During DECODING, the growth algorithm runs: syndrome nodes expand outward,
 // passive nodes join growing regions, and collisions trigger matching.
 // After all active regions are matched (or timeout), the grid enters PEELING
-// where the leaf-peeling algorithm runs to extract correction paths.
-// The CorrectionExtractor then computes the data-qubit correction vector.
+// where path-marking waves propagate from primary collision nodes toward
+// their tree roots, identifying the correction path.
+// The CorrectionExtractor then computes the data-qubit correction vector
+// from the marked path edges and primary collision edges.
 
 case class DecoderGrid(config: DecoderConfig) extends Component {
   val rows = config.gridRows
@@ -35,6 +37,7 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
     val nodeMatchDirs  = out Vec(ParentDir(), rows * cols)
     val nodePeeled    = out Vec(Bool(), rows * cols)
     val nodeSyndromes = out Vec(Bool(), rows * cols)
+    val nodeOnPath    = out Vec(Bool(), rows * cols)
 
     // Aggregate correction output
     val correctionFlags = out Bits(config.numStabilizers bits)
@@ -64,16 +67,22 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
   val nodeStart     = RegInit(False)
   val nodeStartPeel = RegInit(False)
 
+  // Boundary matching enable: asserted after growth has run long enough
+  // for region-to-region collisions to have priority
+  val boundaryEnableWire = (phaseReg === GridPhase.DECODING) &&
+    (cycleCount >= config.boundaryMatchDelay)
+
   // Wire global control signals and syndrome bits to each node
   for (r <- 0 until rows; c <- 0 until cols) {
     val node = nodes(r)(c)
     val flatIdx = r * cols + c
 
-    node.io.syndromeIn := io.syndromeFrame(flatIdx)
-    node.io.loadEnable := io.loadEnable
-    node.io.start      := nodeStart
-    node.io.startPeel  := nodeStartPeel
-    node.io.reset_n    := io.reset_n
+    node.io.syndromeIn    := io.syndromeFrame(flatIdx)
+    node.io.loadEnable    := io.loadEnable
+    node.io.start         := nodeStart
+    node.io.startPeel     := nodeStartPeel
+    node.io.reset_n       := io.reset_n
+    node.io.boundaryEnable := boundaryEnableWire
   }
 
   // ── Wire nearest-neighbor links ────────────────────────────────────
@@ -93,6 +102,80 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
     else              node.io.neighborIn.east := NodeLinkUtils.tiedOff(config)
   }
 
+  // ── Primary collision selection ────────────────────────────────────
+  // Two types of collisions:
+  //   1. Region-to-region: matchedWith > 0, regionId < matchedWith.
+  //      Select one per (regionId, matchedWith) pair (smallest index).
+  //   2. Boundary: matchedWith = 0. Select one per regionId (smallest index).
+  // The collision partner (for region-to-region) also gets marked.
+  val dirOffsets = Seq((-1, 0), (1, 0), (0, 1), (0, -1))  // N, S, E, W
+  val oppositeDirEnums = Seq(ParentDir.SOUTH, ParentDir.NORTH, ParentDir.WEST, ParentDir.EAST)
+
+  val isPrimary = Vec(Bool(), rows * cols)
+  val isPartner = Vec(Bool(), rows * cols)
+
+  for (r <- 0 until rows; c <- 0 until cols) {
+    val idx = r * cols + c
+    val node = nodes(r)(c)
+    val hasCollision = node.io.matchDir =/= ParentDir.NONE
+    val isBoundaryMatch = node.io.matchedWithId === U(0)
+    val isRegionCollision = hasCollision && !isBoundaryMatch
+    val isSmaller = node.io.regionId < node.io.matchedWithId
+
+    // Candidate: region collision with smaller ID, OR boundary match
+    val isCandidate = (isRegionCollision && isSmaller) || (hasCollision && isBoundaryMatch)
+
+    // Check if any earlier node (smaller index) in the same region has
+    // the same collision type — if so, this node is not primary
+    val earlierExists = (0 until idx).map { prevIdx =>
+      val pr = prevIdx / cols
+      val pc = prevIdx % cols
+      val prev = nodes(pr)(pc)
+      val prevHasCollision = prev.io.matchDir =/= ParentDir.NONE
+      val prevIsBoundary = prev.io.matchedWithId === U(0)
+      val prevIsRegion = prevHasCollision && !prevIsBoundary
+      val prevIsSmaller = prev.io.regionId < prev.io.matchedWithId
+      val sameRegion = prev.io.regionId === node.io.regionId
+      val sameMatch = prev.io.matchedWithId === node.io.matchedWithId
+
+      // Earlier node in same region with same collision pairing
+      sameRegion && sameMatch && (
+        (prevIsRegion && prevIsSmaller) || (prevHasCollision && prevIsBoundary)
+      )
+    }
+
+    isPrimary(idx) := isCandidate &&
+      (if (earlierExists.isEmpty) True else !earlierExists.reduce(_ || _))
+  }
+
+  // The partner of a primary collision node is the neighbor in its matchDir.
+  // Boundary matches have no partner (the boundary is virtual).
+  for (r <- 0 until rows; c <- 0 until cols) {
+    val idx = r * cols + c
+    val partnerChecks = for (i <- 0 until 4) yield {
+      val dr = dirOffsets(i)._1
+      val dc = dirOffsets(i)._2
+      val nr = r + dr
+      val nc = c + dc
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+        val nidx = nr * cols + nc
+        // Only region-to-region collisions have partners
+        isPrimary(nidx) &&
+          (nodes(nr)(nc).io.matchedWithId =/= U(0)) &&
+          (nodes(nr)(nc).io.matchDir === oppositeDirEnums(i))
+      } else {
+        False
+      }
+    }
+    isPartner(idx) := partnerChecks.reduce(_ || _)
+  }
+
+  // Wire startPathMark: asserted for primary collision nodes and their partners
+  for (r <- 0 until rows; c <- 0 until cols) {
+    val idx = r * cols + c
+    nodes(r)(c).io.startPathMark := isPrimary(idx) || isPartner(idx)
+  }
+
   // ── Wire status outputs ────────────────────────────────────────────
   for (r <- 0 until rows; c <- 0 until cols) {
     val flatIdx = r * cols + c
@@ -102,6 +185,7 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
     io.nodeMatchDirs(flatIdx)  := nodes(r)(c).io.matchDir
     io.nodePeeled(flatIdx)     := nodes(r)(c).io.peeled
     io.nodeSyndromes(flatIdx)  := nodes(r)(c).io.syndrome
+    io.nodeOnPath(flatIdx)     := nodes(r)(c).io.onPath
     io.correctionFlags(flatIdx) := nodes(r)(c).io.correctionFlag
   }
 
@@ -138,6 +222,8 @@ case class DecoderGrid(config: DecoderConfig) extends Component {
     extractor.io.nodeRegionIds(i)  := io.nodeRegionIds(i)
     extractor.io.nodeMatchedWith(i) := nodes(i / cols)(i % cols).io.matchedWithId
     extractor.io.nodeSyndromes(i)  := io.nodeSyndromes(i)
+    extractor.io.nodeOnPath(i)     := io.nodeOnPath(i)
+    extractor.io.isPrimaryCollision(i) := isPrimary(i)
   }
   extractor.io.trigger := doneReg
   io.correction := extractor.io.correction
